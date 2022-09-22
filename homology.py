@@ -26,13 +26,33 @@ def ripser2gtda(dgm, max_dim):
             pers_diag[idx,1] = dgm[dim][idx][1]
             pers_diag[idx,2] = dim
         diags.append(copy.deepcopy(pers_diag))
+        
     return(np.vstack(diags))    
+
+##### Ref: https://colab.research.google.com/drive/1addhGqN3ZE1mIn4L6jQnnkVs7_y__qSE?usp=sharing
+##### Credit: Florent Poux
+def grid_subsampling(points, voxel_size):
+
+  nb_vox = np.ceil((np.max(points, axis=0) - np.min(points, axis=0))/voxel_size)
+  non_empty_voxel_keys, inverse, nb_pts_per_voxel = np.unique(((points - np.min(points, axis=0)) // voxel_size).astype(int), axis=0, return_inverse=True, return_counts=True)
+  idx_pts_vox_sorted = np.argsort(inverse)
+  voxel_grid = {}
+  grid_barycenter,grid_candidate_center = [],[]
+  last_seen = 0
+
+  for idx,vox in enumerate(non_empty_voxel_keys):
+    voxel_grid[tuple(vox)] = points[idx_pts_vox_sorted[last_seen:last_seen+nb_pts_per_voxel[idx]]]
+    grid_barycenter.append(np.mean(voxel_grid[tuple(vox)],axis=0))
+    grid_candidate_center.append(voxel_grid[tuple(vox)][np.linalg.norm(voxel_grid[tuple(vox)]-np.mean(voxel_grid[tuple(vox)],axis=0),axis=1).argmin()])
+    last_seen += nb_pts_per_voxel[idx]
+
+  return grid_candidate_center
     
 ### params
 
-cell_type = "Gfap"
+cell_type = "Iba1"
 max_dim = 1
-num_samples = 10000
+grid_voxel_size = 150
 
 csv_files = glob.glob(os.path.join("data", cell_type, "*.csv"))
 betti_curve = BettiCurve(n_bins=100, n_jobs=-1)
@@ -49,18 +69,26 @@ for csv_fname in csv_files:
     if ctype == cell_type:
         
         print(csv_fname + ":\t MouseID: " + mid[1:] + "\t Days Post Injury: " + dpi[:-1])
+        
+        #### load and sample point cloud
     
         df = pd.read_csv(csv_fname)
         coords = df[['X', 'Y', 'Z']].to_numpy()
-        np.random.shuffle(coords)
+        pcd = np.array(grid_subsampling(coords, grid_voxel_size))
+        
+        print("Subsampled " + str(pcd.shape[0]) + " out of " + str(coords.shape[0]) + " points")
 
-        dgm = rpp_py.run("--dim " + str(max_dim) + " --format point-cloud", coords[:num_samples, :])
+        dgm = rpp_py.run("--dim " + str(max_dim) + " --format point-cloud", pcd)
         gtda_dgm = ripser2gtda(dgm, max_dim)
         
         bc = betti_curve.fit_transform([gtda_dgm])
         
-        TDA_data.append(copy.deepcopy((dpi, mid, gtda_dgm, bc)))
+        TDA_data.append(copy.deepcopy((dpi, mid, gtda_dgm, bc, pcd)))
         
+        if not os.path.exists(os.path.join("results", cell_type)):
+            os.makedirs(os.path.join("results", cell_type))
+        ofilename = mid + "_" + dpi + "_" + ctype + ".npy"
+        np.save(os.path.join("results", cell_type, ofilename), {"dgm":gtda_dgm, "bc":bc, "data":pcd})    
 
 ### plotting
 
@@ -70,9 +98,10 @@ for dim in range(max_dim+1):
 
     for idx in range(len(TDA_data)):
         
-        (dpi, mid, pers_diags, betti_curves) = TDA_data[idx]
+        (dpi, mid, pers_diags, betti_curves, pt_cloud) = TDA_data[idx]
 
         bc = betti_curves[0][dim]
+        num_samples = pt_cloud.shape[0]
         
         if dpi == "0D":
             plt.plot(bc.flatten()/num_samples, linewidth=0.4, alpha=0.7, color="indigo")
